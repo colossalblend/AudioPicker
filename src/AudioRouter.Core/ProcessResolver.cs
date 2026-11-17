@@ -55,14 +55,44 @@ namespace AudioRouter.Core
 
             float bestPeak = 0f;
             uint bestPid = 0;
-            foreach (var (pid, peak) in Wasapi.GetSessionPeaks())
+            // per-pid peaks straight from NAudio sessions (name aggregation
+            // would lose the family distinction here)
+            try
             {
-                if (family.Contains(pid) && peak > bestPeak)
+                var en = new NAudio.CoreAudioApi.MMDeviceEnumerator();
+                foreach (var dev in en.EnumerateAudioEndPoints(
+                    NAudio.CoreAudioApi.DataFlow.Render, NAudio.CoreAudioApi.DeviceState.Active))
                 {
-                    bestPeak = peak;
-                    bestPid = pid;
+                    try
+                    {
+                        var mgr = dev.AudioSessionManager;
+                        int count = mgr.Sessions.Count;
+                        for (int i = 0; i < count; i++)
+                        {
+                            var ses = mgr.Sessions[i];
+                            try
+                            {
+                                uint pid = ses.GetProcessID;
+                                if (!family.Contains(pid)) continue;
+                                float peak = 0f;
+                                try { peak = ses.AudioMeterInformation.MasterPeakValue; }
+                                catch { }
+                                if (peak > bestPeak) { bestPeak = peak; bestPid = pid; }
+                            }
+                            finally
+                            {
+                                try { ses.Dispose(); } catch { }
+                            }
+                        }
+                    }
+                    catch { }
+                    finally
+                    {
+                        try { dev.Dispose(); } catch { }
+                    }
                 }
             }
+            catch { }
             if (bestPeak > 0f) return bestPid;
 
             var ppid = new Dictionary<uint, uint>();

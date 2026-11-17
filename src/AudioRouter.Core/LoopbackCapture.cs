@@ -54,6 +54,15 @@ namespace AudioRouter.Core
             public readonly int Channels;
             public readonly int BytesPerFrame;
             public readonly bool IsFloat;
+
+            public WaveFormat(int rate, int channels, int bytesPerFrame, bool isFloat)
+            {
+                Rate = rate;
+                Channels = channels;
+                BytesPerFrame = bytesPerFrame;
+                IsFloat = isFloat;
+            }
+
             public WaveFormat(Wasapi.WAVEFORMATEX w)
             {
                 Rate = (int)w.nSamplesPerSec;
@@ -148,12 +157,13 @@ namespace AudioRouter.Core
                 try
                 {
                     client = Wasapi.ActivateProcessLoopbackClient(selfPid, includeTree: false);
+                    fmt = InitClient(client, Wasapi.WAVEFORMATEX.Float32());
                 }
                 catch
                 {
-                    client = Wasapi.ActivateDeviceClient(Wasapi.GetDefaultRenderDevice());
+                    RunNaudioSystemFallback();
+                    return;
                 }
-                fmt = InitClient(client, Wasapi.WAVEFORMATEX.Float32());
             }
 
             int hr = client.GetService(in Wasapi.IID_IAudioCaptureClient, out object svc);
@@ -199,8 +209,40 @@ namespace AudioRouter.Core
             client.Stop();
         }
 
-        private static WaveFormat InitClient(Wasapi.IAudioClient client, Wasapi.WAVEFORMATEX fmt)
+        /// <summary>Rare fallback: raw process-loopback activation failed, so
+        /// capture the default render device's loopback through NAudio instead.
+        /// Runs until cancellation; pushes through the same sink.</summary>
+        private void RunNaudioSystemFallback()
         {
+            using var cap = new NAudio.Wave.WasapiLoopbackCapture();
+            var nf = cap.WaveFormat;
+            var fmt = new WaveFormat(nf.SampleRate, nf.Channels,
+                nf.Channels * nf.BitsPerSample / 8,
+                nf.Encoding == NAudio.Wave.WaveFormatEncoding.IeeeFloat);
+            var buffer = new List<float>(8192);
+            cap.DataAvailable += (_, e) =>
+            {
+                if (e.BytesRecorded <= 0) return;
+                PacketToStereo48k(e.Buffer.AsSpan(0, e.BytesRecorded), fmt, buffer);
+                if (buffer.Count >= 512)
+                {
+                    _sink.Push(buffer.ToArray());
+                    buffer.Clear();
+                }
+            };
+            cap.StartRecording();
+            try
+            {
+                while (!_cts.IsCancellationRequested)
+                    _cts.Token.WaitHandle.WaitOne(100);
+            }
+            finally
+            {
+                cap.StopRecording();
+            }
+        }
+
+        private static WaveFormat InitClient(Wasapi.IAudioClient client, Wasapi.WAVEFORMATEX fmt)        {
             int hr = client.Initialize(0 /* shared */, Wasapi.AUDCLNT_STREAMFLAGS_LOOPBACK,
                 2_000_000, 0, ref fmt, IntPtr.Zero);
             if (hr == 0)

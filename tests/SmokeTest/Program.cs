@@ -14,6 +14,8 @@ namespace SmokeTest
                 PlaySine(float.Parse(args[1]), int.Parse(args[2]));
                 return 0;
             }
+            if (args.Length >= 1 && args[0] == "--path")
+                return StartPathTest.Run();
             return Run();
         }
 
